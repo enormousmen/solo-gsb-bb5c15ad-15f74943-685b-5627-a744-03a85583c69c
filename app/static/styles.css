@@ -165,10 +165,11 @@ td.wrap { white-space: normal; min-width: 240px; }
 }
 .errors-panel h3 { color: var(--danger-text); margin-top: 0; }
 #errors-list, #repair-errors-list, #audit-errors-list, #duration-errors-list,
-#peak-errors-list, #merge-errors-list, #od-errors-list { margin: 0; padding-left: 20px; }
+#peak-errors-list, #merge-errors-list, #od-errors-list,
+#queue-errors-list { margin: 0; padding-left: 20px; }
 #errors-list li, #repair-errors-list li, #audit-errors-list li,
 #duration-errors-list li, #peak-errors-list li, #merge-errors-list li,
-#od-errors-list li {
+#od-errors-list li, #queue-errors-list li {
   margin-bottom: 8px;
   color: var(--danger-text);
   font-size: 13px;
@@ -389,4 +390,31 @@ tr.peak-alert-row td { font-weight: 600; }
   color: var(--muted);
   padding: 16px !important;
   white-space: normal !important;
+}
+
+/* ---------------- 闸机容量排队推演 ---------------- */
+.tag-uncleared { background: var(--danger-text); }
+.tag-cleared { background: var(--save); }
+
+tr.queue-uncleared-row { background: #fff3f3 !important; }
+tr.queue-uncleared-row td { font-weight: 600; }
+tr.queue-backlog-row { background: #fffaf0 !important; }
+
+.queue-group { margin-top: 16px; }
+.queue-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0 8px;
+}
+.queue-group h3 .hint { margin: 0; font-weight: 400; }
+
+.queue-extra-tag {
+  display: inline-block;
+  background: #fdf0d5;
+  color: #8a5a00;
+  border-radius: 4px;
+  padding: 1px 8px;
+  font-size: 12px;
 }

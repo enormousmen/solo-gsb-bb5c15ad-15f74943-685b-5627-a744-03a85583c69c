@@ -524,6 +524,68 @@ X999, 2026-09-18 08:10:00, 中心公园, 进"></textarea>
       </div>
     </section>
 
+    <!-- 闸机容量排队推演 -->
+    <section class="card" id="sec-queue">
+      <h2>13. 闸机容量排队推演</h2>
+      <p class="hint">直接统计<strong>已保存</strong>的刷卡记录（与进出站配对、站点分区、票价无关，
+        相关数据错误<strong>不阻断</strong>）：选择<strong>运营日</strong>、<strong>1 / 5 / 15 分钟</strong>时间桶、
+        <strong>每桶通行能力</strong>与<strong>最多续算桶数</strong>，按<strong>站点 × 进/出方向</strong>
+        分组统计到达量。桶从运营日分界时刻（当前已保存配置）对齐，采用半开区间
+        <code>[开始, 结束)</code>；每组逐桶递推 <code>处理量 = min(期初积压 + 到达量, 容量)</code>，
+        未处理量结转下一桶；最后一笔到达后继续以空桶消化积压，达到续算上限仍未清空则标记
+        <strong>未清</strong>。结果给出逐桶到达 / 处理 / 期末积压与峰值积压、首次超载、清空时刻，
+        可导出 CSV。推演<strong>全程只读</strong>：不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>运营日
+          <input type="date" id="queue-day" />
+        </label>
+        <label>时间桶（分钟）
+          <select id="queue-bucket">
+            <option value="1">1 分钟</option>
+            <option value="5" selected>5 分钟</option>
+            <option value="15">15 分钟</option>
+          </select>
+        </label>
+        <label>每桶通行能力（人次/桶）
+          <input type="number" id="queue-capacity" min="1" value="10" />
+        </label>
+        <label>最多续算桶数（0 = 不续算）
+          <input type="number" id="queue-extra" min="0" value="12" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-queue-run" type="button">🛂 开始排队推演</button>
+        <button class="btn btn-ghost" id="btn-queue-csv" type="button" hidden>⬇ 导出 CSV</button>
+        <span id="queue-status" class="status"></span>
+      </div>
+
+      <div id="queue-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行排队推演 —— 参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="queue-errors-list"></ul>
+      </div>
+
+      <div id="queue-result" class="audit-result" hidden>
+        <div id="queue-summary" class="audit-summary"></div>
+
+        <h3>分组汇总</h3>
+        <div class="table-wrap">
+          <table id="queue-groups-table">
+            <thead>
+              <tr>
+                <th>状态</th><th>站点</th><th>方向</th>
+                <th>到达量</th><th>峰值积压</th><th>峰值出现桶</th>
+                <th>首次超载</th><th>清空时刻</th>
+                <th>续算桶数</th><th>期末积压</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div id="queue-groups-detail"></div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>
