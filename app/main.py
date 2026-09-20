@@ -16,6 +16,7 @@ from .core import (
     duration_audit,
     external_merge_preview,
     fare_path_audit,
+    gate_queue_sim,
     od_flow_publish,
     parse_fares_text,
     parse_records_text,
@@ -28,6 +29,7 @@ from .core import (
 )
 from .schemas import (
     ConfigIn,
+    GateQueueIn,
     MergePreviewIn,
     OdPublishIn,
     PeakAuditIn,
@@ -48,7 +50,7 @@ app = FastAPI(
     title="公交刷卡票价核验台",
     description="录入站点分区、票价矩阵、换乘抵扣、每日封顶与刷卡记录，"
                 "按卡号配对进出站并核验计价。",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
 )
 
@@ -483,6 +485,51 @@ def run_od_flow_publish(body: OdPublishIn):
         "suppressed_bucket_count": result.suppressed_bucket_count,
         "suppressed_trip_count": result.suppressed_trip_count,
         "rows": result.rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 闸机容量排队推演（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+@app.post("/api/gate-queue-sim")
+def run_gate_queue_sim(body: GateQueueIn):
+    """对已保存刷卡记录做闸机容量排队推演。
+
+    - 选择运营日、1/5/15 分钟桶、每桶通行能力与最多续算空桶数；桶从
+      运营日分界时刻起对齐，半开区间 [开始, 结束)；
+    - 按（站点, 进/出方向）分组统计刷卡到达量，逐桶递推
+      处理量 = min(期初积压 + 到达量, 容量)，未处理量结转下一桶；
+      最后一笔到达后继续空桶消化，达到续算上限仍未清空则标记未清；
+    - 直接统计已保存刷卡记录，不依赖进出站配对、站点分区与票价；
+    - 参数非法（CONFIG_BAD）返回 422；全程只读：不修改记录、配置或账单。
+    """
+    with db.connect() as conn:
+        cfg = db.get_config(conn)
+        _stations, _fares, records = db.load_domain(conn)
+        result = gate_queue_sim(
+            records, cfg,
+            body.operating_day, body.bucket_minutes,
+            body.capacity, body.max_extra_buckets)
+
+    if not result.ok:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "errors": result.errors})
+
+    return {
+        "ok": True,
+        "operating_day": result.operating_day,
+        "day_split_hour": result.day_split_hour,
+        "bucket_minutes": result.bucket_minutes,
+        "capacity": result.capacity,
+        "max_extra_buckets": result.max_extra_buckets,
+        "day_start": result.day_start,
+        "day_end": result.day_end,
+        "record_count": result.record_count,
+        "group_count": result.group_count,
+        "uncleared_count": result.uncleared_count,
+        "groups": result.groups,
     }
 
 

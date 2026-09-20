@@ -2017,3 +2017,241 @@ def od_flow_publish(stations: list[Station],
         suppressed_trip_count=suppressed_trips,
         rows=rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# 闸机容量排队推演（只读：不改记录、配置或账单）
+# ---------------------------------------------------------------------------
+
+# 时间桶允许的粒度（分钟）；均能整除 1440，桶可从运营日分界时刻严格对齐
+GATE_BUCKET_CHOICES = (1, 5, 15)
+GATE_DAY_FMT = "%Y-%m-%d"
+GATE_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+@dataclass
+class GateQueueResult:
+    """闸机容量排队推演结果。
+
+    参数非法（运营日格式错误、桶粒度不在 1/5/15、每桶通行能力非正整数、
+    最多续算桶数为负整数 / 非整数、运营日分界时刻非法）时 ok=False，
+    errors 携带 CONFIG_BAD，不生成任何推演结果。
+    ok=True 时 groups 按「站点 × 进/出方向」给出每个组的逐桶到达 / 处理 /
+    积压推演与峰值积压、首次超载、清空时刻等汇总。
+    """
+    ok: bool
+    operating_day: str = ""
+    day_split_hour: int = 0
+    bucket_minutes: int = 0
+    capacity: int = 0
+    max_extra_buckets: int = 0
+    day_start: str = ""
+    day_end: str = ""
+    record_count: int = 0
+    group_count: int = 0
+    uncleared_count: int = 0
+    groups: list[dict] = field(default_factory=list)
+    errors: list[dict] = field(default_factory=list)
+
+
+def gate_queue_sim(records: list[Swipe],
+                   cfg: Config,
+                   operating_day,
+                   bucket_minutes,
+                   capacity,
+                   max_extra_buckets) -> GateQueueResult:
+    """闸机容量排队推演（全程只读：不改记录、配置或账单）。
+
+    直接统计**已保存的刷卡记录本身**（与进出站配对、站点分区、票价完全
+    无关，因此任何配对 / 站点 / 票价错误都不会阻断推演）：
+
+    - 用户选择运营日（YYYY-MM-DD）、桶粒度（1 / 5 / 15 分钟）、每桶通行
+      能力（正整数）与最多续算空桶数（非负整数）；桶从**运营日分界时刻**
+      起按桶长对齐，半开区间 [开始, 结束)，运营日窗口为
+      [当日 split:00, 次日 split:00)；
+    - 按（站点, 进/出方向）分组统计每个桶的刷卡到达量；
+    - 每组按半开桶递推：处理量 = min(期初积压 + 到达量, 容量)，
+      期末积压 = 期初积压 + 到达量 − 处理量，未处理量结转下一桶；
+    - 最后一笔到达所在桶之后继续追加**零到达空桶**消化积压，直到积压
+      清零或续算桶数达到上限；达到上限仍未清空则标记 cleared=False；
+    - 展示逐桶到达、期初积压、处理、期末积压，以及峰值积压（首次达到的
+      桶起点）、首次超载（需求 > 容量的首个桶）与清空时刻
+      （积压最后一次由正转 0 的桶结束时刻；从未积压则为 None）。
+    """
+    errors: list[dict] = []
+    day_text = str(operating_day).strip()
+    day0: Optional[datetime] = None
+    try:
+        day0 = datetime.strptime(day_text, GATE_DAY_FMT)
+    except (ValueError, TypeError):
+        errors.append(_err(
+            "CONFIG_BAD",
+            f"运营日必须是 YYYY-MM-DD 格式的日期：{operating_day!r}"))
+    if not _is_int_value(cfg.day_split_hour) \
+            or not (0 <= int(cfg.day_split_hour) <= 23):
+        errors.append(_err(
+            "CONFIG_BAD", "运营日分界时刻必须是 0-23 之间的整数小时"))
+    if not _is_int_value(bucket_minutes) \
+            or int(bucket_minutes) not in GATE_BUCKET_CHOICES:
+        errors.append(_err(
+            "CONFIG_BAD",
+            f"时间桶粒度必须是 {GATE_BUCKET_CHOICES} 之一（分钟），"
+            f"实际：{bucket_minutes!r}"))
+    if not _is_int_value(capacity) or int(capacity) < 1:
+        errors.append(_err(
+            "CONFIG_BAD",
+            f"每桶通行能力必须为不小于 1 的整数（人次），实际：{capacity!r}"))
+    if not _is_int_value(max_extra_buckets) or int(max_extra_buckets) < 0:
+        errors.append(_err(
+            "CONFIG_BAD",
+            "最多续算空桶数必须为不小于 0 的整数，"
+            f"实际：{max_extra_buckets!r}"))
+    if errors:
+        return GateQueueResult(ok=False, errors=errors)
+
+    split_hour = int(cfg.day_split_hour)
+    bucket_minutes = int(bucket_minutes)
+    capacity = int(capacity)
+    max_extra_buckets = int(max_extra_buckets)
+
+    day_start = day0 + timedelta(hours=split_hour)
+    day_end = day_start + timedelta(days=1)
+    step = timedelta(minutes=bucket_minutes)
+    step_seconds = bucket_minutes * 60
+
+    # （站点, 方向）-> {运营日内桶序号: 到达量}；只统计窗口内的刷卡记录。
+    arrivals_by_group: dict[tuple[str, str], dict[int, int]] = {}
+    record_count = 0
+    for r in records:
+        if not (day_start <= r.t < day_end):
+            continue
+        record_count += 1
+        idx = int((r.t - day_start).total_seconds() // step_seconds)
+        arrivals_by_group.setdefault((r.station, r.action), {})
+        arrivals_by_group[(r.station, r.action)][idx] = \
+            arrivals_by_group[(r.station, r.action)].get(idx, 0) + 1
+
+    def bucket_row(idx: int, arrival: int, begin: int,
+                   processed: int, end: int, continuation: bool) -> dict:
+        start_t = day_start + idx * step
+        return {
+            "bucket_index": idx,
+            "start_time": start_t.strftime(GATE_TIME_FMT),
+            "end_time": (start_t + step).strftime(GATE_TIME_FMT),
+            "continuation": continuation,
+            "arrival_count": arrival,
+            "begin_backlog": begin,
+            "processed_count": processed,
+            "end_backlog": end,
+            "overloaded": begin + arrival > capacity,
+        }
+
+    groups: list[dict] = []
+    for (station, action), arrivals in arrivals_by_group.items():
+        first_idx = min(arrivals)
+        last_idx = max(arrivals)
+
+        rows: list[dict] = []
+        backlog = 0
+        peak = 0
+        peak_idx: Optional[int] = None
+        first_overload_idx: Optional[int] = None
+        # 积压最后一次「由正转 0」的桶（最终清空时刻所在桶）
+        clear_idx: Optional[int] = None
+
+        # 最后一笔到达之前的空桶（含两笔到达之间的空槽）照常逐桶递推；
+        # 首个到达桶之前的空桶必然全 0，不输出。
+        for i in range(first_idx, last_idx + 1):
+            arrival = arrivals.get(i, 0)
+            demand = backlog + arrival
+            processed = min(demand, capacity)
+            end = demand - processed
+            if demand > capacity and first_overload_idx is None:
+                first_overload_idx = i
+            if end > peak:
+                peak = end
+                peak_idx = i
+            # 清空时刻只记录积压「由正转 0」的桶结束时刻；全程从未积压的
+            # 组（clear_time 保持 None）由 first_overload_idx 是否为空识别。
+            if backlog > 0 and end == 0:
+                clear_idx = i
+            rows.append(bucket_row(i, arrival, backlog, processed, end, False))
+            backlog = end
+
+        # 最后一笔到达之后继续零到达空桶消化积压（可越过运营日窗口末端，
+        # 仍沿同一桶网格），直到清零或达到续算桶数上限。
+        extra_used = 0
+        idx = last_idx
+        while backlog > 0 and extra_used < max_extra_buckets:
+            idx += 1
+            extra_used += 1
+            demand = backlog  # 到达量为 0
+            processed = min(demand, capacity)
+            end = demand - processed
+            if end > peak:
+                peak = end
+                peak_idx = idx
+            if end == 0:
+                clear_idx = idx
+            rows.append(bucket_row(idx, 0, backlog, processed, end, True))
+            backlog = end
+
+        cleared = backlog == 0
+        total_arrivals = sum(arrivals.values())
+
+        def time_at(bucket_idx: Optional[int], end_of: bool = False
+                    ) -> Optional[str]:
+            if bucket_idx is None:
+                return None
+            # bucket_idx 为桶起点在窗口网格上的序号；取桶结束时刻时
+            # 加 1 个桶长（半开区间的右端）。
+            t = day_start + (bucket_idx + (1 if end_of else 0)) * step
+            return t.strftime(GATE_TIME_FMT)
+
+        groups.append({
+            "_peak": peak,
+            "_overload": first_overload_idx,
+            "station": station,
+            "action": action,
+            "direction": ACTION_LABELS.get(action, action),
+            "total_arrivals": total_arrivals,
+            "processed_total": sum(r["processed_count"] for r in rows),
+            "peak_backlog": peak,
+            "peak_time": time_at(peak_idx),
+            "first_overload_time": time_at(first_overload_idx),
+            "cleared": cleared,
+            "clear_time": time_at(clear_idx, end_of=True)
+                          if cleared and clear_idx is not None else None,
+            "remaining_backlog": backlog,
+            "extra_buckets_used": extra_used,
+            "first_bucket_index": first_idx,
+            "last_bucket_index": idx,
+            "bucket_count": len(rows),
+            "buckets": rows,
+        })
+
+    # 组间排序：峰值积压降序；并列时首次超载更早优先（从未超载排后），
+    # 再按站点名、方向稳定排序。
+    groups.sort(key=lambda g: (
+        -g["_peak"],
+        1 if g["_overload"] is None else 0,
+        g["_overload"] if g["_overload"] is not None else 0,
+        g["station"], g["action"]))
+    for g in groups:
+        del g["_peak"]
+        del g["_overload"]
+
+    return GateQueueResult(
+        ok=True,
+        operating_day=day_text,
+        day_split_hour=split_hour,
+        bucket_minutes=bucket_minutes,
+        capacity=capacity,
+        max_extra_buckets=max_extra_buckets,
+        day_start=day_start.strftime(GATE_TIME_FMT),
+        day_end=day_end.strftime(GATE_TIME_FMT),
+        record_count=record_count,
+        group_count=len(groups),
+        uncleared_count=sum(1 for g in groups if not g["cleared"]),
+        groups=groups,
+    )

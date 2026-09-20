@@ -1246,6 +1246,240 @@ function exportOdCsv() {
   toast(`已导出 ${lastOdRows.length} 个发布区间（CSV 仅含聚合数据）`);
 }
 
+/* ---------------- 13. 闸机容量排队推演（只读） ---------------- */
+
+let lastGqData = null;
+
+function renderGqErrors(errors) {
+  const ul = $("gq-errors-list");
+  ul.innerHTML = "";
+  for (const e of errors) ul.appendChild(renderErrorLi(e));
+  $("gq-errors").hidden = false;
+  $("gq-result").hidden = true;
+  $("btn-gq-csv").hidden = true;
+}
+
+function gqGroupHeadHtml(g) {
+  const dirTag = g.action === "IN" ? "tag-in" : "tag-out";
+  const dirText = g.action === "IN" ? "进 ▲" : "出 ▼";
+  let statusTag;
+  if (!g.cleared) {
+    statusTag = `<span class="tag tag-alert">⚠ 未清空（剩 ${g.remaining_backlog}）</span>`;
+  } else if (g.first_overload_time) {
+    statusTag = `<span class="tag tag-ok">✅ 已清空</span>`;
+  } else {
+    statusTag = `<span class="tag tag-ok">✅ 全程无积压</span>`;
+  }
+  const firstOver = g.first_overload_time
+    ? g.first_overload_time
+    : "无（每桶需求均 ≤ 容量）";
+  const clearAt = !g.cleared
+    ? `未清空（续算 ${g.extra_buckets_used} 桶后仍剩 <strong>${g.remaining_backlog}</strong>）`
+    : (g.clear_time
+      ? `<strong>${g.clear_time}</strong>（积压最后一次清空的桶结束时刻）`
+      : "—（全程未产生积压）");
+  const peakAt = g.peak_backlog > 0
+    ? `<strong>${g.peak_backlog}</strong> 人次 <span class="sub">（首次出现于 ${g.peak_time} 起的桶）</span>`
+    : "0 人次";
+  return `<h3>${statusTag} ` +
+    `<span class="gq-station">${escapeHtml(g.station)}</span> ` +
+    `<span class="tag ${dirTag}">${dirText}</span></h3>` +
+    `<div class="gq-group-meta">` +
+    `累计到达 <strong>${g.total_arrivals}</strong> 人次 · 累计处理 <strong>${g.processed_total}</strong> 人次 · ` +
+    `峰值期末积压 ${peakAt} · 首次超载：${firstOver} · 清空时刻：${clearAt}` +
+    `</div>`;
+}
+
+function renderGateQueue(data) {
+  $("gq-errors").hidden = true;
+  $("gq-result").hidden = false;
+  $("btn-gq-csv").hidden = data.group_count === 0;
+  lastGqData = data;
+
+  const groups = data.groups || [];
+  const overGroups = groups.filter((g) => g.first_overload_time).length;
+  if (!groups.length) {
+    $("gq-summary").innerHTML =
+      `运营日 <strong>${data.operating_day}</strong>` +
+      `（窗口 <strong>${data.day_start}</strong> ～ <strong>${data.day_end}</strong>，` +
+      `分界 ${data.day_split_hour}:00）内没有任何已保存刷卡记录。<br>` +
+      `<span class="sub">推演全程只读：未修改记录、配置或账单。</span>`;
+  } else {
+    $("gq-summary").innerHTML =
+      `运营日 <strong>${data.operating_day}</strong>` +
+      `（窗口 <strong>${data.day_start}</strong> ～ <strong>${data.day_end}</strong>，` +
+      `分界 ${data.day_split_hour}:00）· 桶 <strong>${data.bucket_minutes}</strong> 分钟 · ` +
+      `每桶通行能力 <strong>${data.capacity}</strong> 人次 · ` +
+      `最多续算 <strong>${data.max_extra_buckets}</strong> 个空桶：` +
+      `窗口内刷卡 <strong>${data.record_count}</strong> 条，` +
+      `<strong>${data.group_count}</strong> 个「站点 × 方向」组，` +
+      `其中 <strong>${overGroups}</strong> 组出现超载，` +
+      `<strong>${data.uncleared_count}</strong> 组续算后<strong>仍未清空</strong>。<br>` +
+      `<span class="sub">桶从运营日分界时刻对齐，半开区间 [开始, 结束)；` +
+      `处理量 = min(期初积压 + 到达量, 容量)，未处理量结转下一桶；` +
+      `推演全程只读，记录 / 配置 / 账单均未改动。</span>`;
+  }
+
+  const box = $("gq-groups");
+  box.innerHTML = "";
+  for (const g of groups) {
+    const div = document.createElement("div");
+    div.className = "gq-group" + (g.cleared ? "" : " gq-group-uncleared");
+    div.innerHTML = gqGroupHeadHtml(g);
+
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    const table = document.createElement("table");
+    table.className = "gq-table";
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>桶序号</th><th>桶开始</th><th>桶结束（不含）</th><th>类型</th>
+          <th>到达量</th><th>期初积压</th><th>处理量</th><th>期末积压</th><th>超载</th>
+        </tr>
+      </thead>
+      <tbody></tbody>`;
+    const tb = table.querySelector("tbody");
+    for (const b of g.buckets) {
+      const tr = document.createElement("tr");
+      if (b.continuation) tr.classList.add("gq-cont");
+      if (b.overloaded) tr.classList.add("gq-over");
+      if (g.peak_backlog > 0 && b.end_backlog === g.peak_backlog
+          && b.start_time === g.peak_time) {
+        tr.classList.add("gq-peak");
+      }
+      const endCell = b.end_backlog > 0
+        ? `<td class="num gq-backlog">${b.end_backlog}</td>`
+        : `<td class="num">0</td>`;
+      tr.innerHTML = `
+        <td class="num">${b.bucket_index}</td>
+        <td>${b.start_time}</td>
+        <td>${b.end_time}</td>
+        <td>${b.continuation ? '<span class="gq-cont-tag">续算空桶</span>' : "运营日桶"}</td>
+        <td class="num">${b.arrival_count}</td>
+        <td class="num">${b.begin_backlog}</td>
+        <td class="num">${b.processed_count}</td>
+        ${endCell}
+        <td>${b.overloaded ? '<span class="tag tag-alert">超载</span>' : "—"}</td>`;
+      tb.appendChild(tr);
+    }
+    wrap.appendChild(table);
+    div.appendChild(wrap);
+    box.appendChild(div);
+  }
+}
+
+async function runGateQueue() {
+  const status = $("gq-status");
+  const body = {
+    operating_day: $("gq-day").value,
+    bucket_minutes: Number($("gq-bucket").value),
+    capacity: Number($("gq-capacity").value),
+    max_extra_buckets: Number($("gq-extra").value),
+  };
+  if (!body.operating_day) {
+    status.textContent = "请先选择运营日";
+    status.className = "status bad";
+    return;
+  }
+  if (!Number.isFinite(body.capacity) || !Number.isFinite(body.max_extra_buckets)) {
+    status.textContent = "每桶通行能力与最多续算桶数必须填写为有效整数";
+    status.className = "status bad";
+    return;
+  }
+  status.textContent = "排队推演中…";
+  status.className = "status";
+  $("gq-errors").hidden = true;
+  $("gq-result").hidden = true;
+  $("btn-gq-csv").hidden = true;
+  try {
+    const data = await api("/api/gate-queue-sim", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    renderGateQueue(data);
+    status.textContent =
+      `推演完成：${data.group_count} 个站点 / 方向组，${data.uncleared_count} 组续算后未清空` +
+      "（只读，记录 / 配置 / 账单均未改动）";
+    status.className = "status ok";
+    toast("闸机排队推演完成（只读，未保存任何改动）");
+  } catch (e) {
+    const errors = (e.payload && e.payload.errors) || [];
+    if (errors.length) {
+      renderGqErrors(errors);
+      status.textContent = "参数不合法，未生成推演结果（数据均未改动）";
+    } else {
+      status.textContent = summaryError(e, "排队推演请求失败");
+    }
+    status.className = "status bad";
+    toast("无法执行排队推演", false);
+  }
+}
+
+function buildGqCsv(data) {
+  const header = [
+    "运营日", "站点", "方向", "桶序号", "桶开始", "桶结束(不含)", "桶类型",
+    "到达量", "期初积压", "处理量", "期末积压", "是否超载",
+  ];
+  const lines = [header.map(odCsvCell).join(",")];
+  for (const g of data.groups || []) {
+    for (const b of g.buckets || []) {
+      lines.push([
+        data.operating_day, g.station,
+        g.action === "IN" ? "进" : "出",
+        b.bucket_index, b.start_time, b.end_time,
+        b.continuation ? "续算空桶" : "运营日桶",
+        b.arrival_count, b.begin_backlog, b.processed_count,
+        b.end_backlog, b.overloaded ? "是" : "否",
+      ].map(odCsvCell).join(","));
+    }
+  }
+  // 汇总行：参数与每组峰值 / 首次超载 / 清空时刻（仅聚合，不含卡号 / 行号）
+  lines.push("");
+  lines.push(`# 运营日,${odCsvCell(data.operating_day)}`);
+  lines.push(`# 运营日窗口,${odCsvCell(`${data.day_start} ～ ${data.day_end}`)}`);
+  lines.push(`# 运营日分界(点),${data.day_split_hour}`);
+  lines.push(`# 时间桶(分钟),${data.bucket_minutes}`);
+  lines.push(`# 每桶通行能力,${data.capacity}`);
+  lines.push(`# 最多续算空桶数,${data.max_extra_buckets}`);
+  lines.push(`# 窗口内刷卡数,${data.record_count}`);
+  lines.push(`# 站点方向组数,${data.group_count}`);
+  lines.push(`# 续算后未清空组数,${data.uncleared_count}`);
+  for (const g of data.groups || []) {
+    lines.push([
+      "# 组汇总", g.station, g.action === "IN" ? "进" : "出",
+      `累计到达=${g.total_arrivals}`, `累计处理=${g.processed_total}`,
+      `峰值积压=${g.peak_backlog}`, `峰值时刻=${g.peak_time || ""}`,
+      `首次超载=${g.first_overload_time || ""}`,
+      g.cleared
+        ? `清空时刻=${g.clear_time || ""}`
+        : `未清空剩余=${g.remaining_backlog}`,
+      `续算桶数=${g.extra_buckets_used}`,
+    ].map(odCsvCell).join(","));
+  }
+  return lines.join("\r\n");
+}
+
+function exportGqCsv() {
+  if (!lastGqData || !lastGqData.group_count) {
+    toast("暂无可导出的推演结果", false);
+    return;
+  }
+  const csv = buildGqCsv(lastGqData);
+  // UTF-8 BOM，便于 Excel 直接识别中文编码
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `gate_queue_${lastGqData.operating_day}_` +
+    `${lastGqData.bucket_minutes}min_cap${lastGqData.capacity}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("已导出逐桶排队推演结果（CSV，UTF-8 BOM）");
+}
+
 /* ---------------- 演示数据 ---------------- */
 
 const DEMO = {
@@ -1357,6 +1591,8 @@ function bind() {
   $("btn-merge-copy").addEventListener("click", copyMergedText);
   $("btn-od-publish").addEventListener("click", runOdPublish);
   $("btn-od-csv").addEventListener("click", exportOdCsv);
+  $("btn-gate-queue").addEventListener("click", runGateQueue);
+  $("btn-gq-csv").addEventListener("click", exportGqCsv);
   $("btn-verify").addEventListener("click", runVerify);
   $("btn-verify-top").addEventListener("click", runVerify);
   $("btn-demo").addEventListener("click", loadDemo);
@@ -1371,6 +1607,7 @@ async function init() {
   const dd = String(today.getDate()).padStart(2, "0");
   $("od-start").value = `${yyyy}-${mm}-${dd}`;
   $("od-end").value = `${yyyy}-${mm}-${dd}`;
+  $("gq-day").value = `${yyyy}-${mm}-${dd}`;
   try {
     const cfg = await loadConfig();
     fillTrialInputs(cfg);

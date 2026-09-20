@@ -64,3 +64,18 @@ class OdPublishIn(BaseModel):
         description="初始时间桶粒度（分钟），取 15 / 30 / 60 之一")
     k: float = Field(
         description="匿名阈值：每个发布区间内的去重卡数下限，取 2～50 的整数")
+
+
+class GateQueueIn(BaseModel):
+    """闸机容量排队推演参数。
+
+    不在此处做数值约束：非法参数应走核心层校验，
+    返回与其他接口一致的 CONFIG_BAD 定位错误（HTTP 422）。
+    """
+    operating_day: str = Field(description="运营日 YYYY-MM-DD")
+    bucket_minutes: float = Field(
+        description="时间桶粒度（分钟），取 1 / 5 / 15 之一")
+    capacity: float = Field(
+        description="每桶通行能力（人次），不小于 1 的整数")
+    max_extra_buckets: float = Field(
+        description="最后一笔到达之后最多续算的空桶数，不小于 0 的整数")

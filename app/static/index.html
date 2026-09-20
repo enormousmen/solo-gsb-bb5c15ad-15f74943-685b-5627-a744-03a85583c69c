@@ -524,6 +524,54 @@ X999, 2026-09-18 08:10:00, 中心公园, 进"></textarea>
       </div>
     </section>
 
+    <!-- 闸机容量排队推演 -->
+    <section class="card" id="sec-gate-queue">
+      <h2>13. 闸机容量排队推演</h2>
+      <p class="hint">直接统计<strong>已保存</strong>的刷卡记录（与配对 / 站点分区 / 票价无关，
+        配对、未知站点、票价错误均不阻断）：选择<strong>运营日</strong>与
+        <strong>1 / 5 / 15 分钟</strong>时间桶，设置<strong>每桶通行能力</strong>与
+        <strong>最多续算桶数</strong>。时间桶从<strong>运营日分界时刻</strong>起按桶长对齐
+        （半开区间 [开始, 结束)），按<strong>站点 × 进/出方向</strong>统计每桶刷卡到达量，
+        逐桶递推 <code>处理量 = min(期初积压 + 到达量, 容量)</code>，未处理量结转下一桶；
+        最后一笔到达之后继续以<strong>零到达空桶</strong>消化积压，达到续算上限仍未清空则
+        <strong>标记未清</strong>。结果给出逐桶到达 / 处理 / 期末积压，以及
+        <strong>峰值积压、首次超载、清空时刻</strong>，支持 CSV 导出。
+        推演<strong>全程只读</strong>：不修改记录、配置或账单。</p>
+      <div class="form-grid">
+        <label>运营日
+          <input type="date" id="gq-day" />
+        </label>
+        <label>时间桶（分钟）
+          <select id="gq-bucket">
+            <option value="1">1 分钟</option>
+            <option value="5" selected>5 分钟</option>
+            <option value="15">15 分钟</option>
+          </select>
+        </label>
+        <label>每桶通行能力（人次，≥1）
+          <input type="number" id="gq-capacity" min="1" step="1" value="2" />
+        </label>
+        <label>最多续算空桶数（≥0）
+          <input type="number" id="gq-extra" min="0" step="1" value="30" />
+        </label>
+      </div>
+      <div class="row-actions">
+        <button class="btn btn-primary" id="btn-gate-queue" type="button">🚪 运行排队推演</button>
+        <button class="btn btn-ghost" id="btn-gq-csv" type="button" hidden>⬇ 导出 CSV</button>
+        <span id="gq-status" class="status"></span>
+      </div>
+
+      <div id="gq-errors" class="errors-panel" hidden>
+        <h3>❌ 无法执行排队推演 —— 参数不合法（记录、配置与账单均未改动）</h3>
+        <ul id="gq-errors-list"></ul>
+      </div>
+
+      <div id="gq-result" class="audit-result" hidden>
+        <div id="gq-summary" class="audit-summary"></div>
+        <div id="gq-groups"></div>
+      </div>
+    </section>
+
     <footer class="footer">
       FastAPI + SQLite + 原生前端 · 数据保存在容器 /data 卷 ·
       <a href="/docs" target="_blank">API 文档</a>
